@@ -231,7 +231,7 @@ msgstr "Bildbetrachter"
 
 #: ../data/org.geeqie.Geeqie.desktop.in:4
 msgid "View and manage images"
-msgstr "Betrachte und manage Bilder"
+msgstr "Betrachte und verwalte Bilder"
 
 #: ../data/org.geeqie.Geeqie.desktop.in:15
 msgid "Picture;Slideshow;Graphics;"
@@ -552,7 +552,7 @@ msgstr "Schlüsselwörter von den ausgewählten Dateien entfernen"
 
 #: ../src/bar-keywords.cc:511
 msgid "Replace existing keywords in selected files with selected keywords"
-msgstr "Bestehende Schlüsselwörter der ausgewählen Dateien austauschen"
+msgstr "Bestehende Schlüsselwörter der ausgewählten Dateien austauschen"
 
 #: ../src/bar-keywords.cc:763
 msgid "Edit keyword"
@@ -589,7 +589,7 @@ msgstr "Markierte Schlüsselwörter"
 
 #: ../src/bar-keywords.cc:832
 msgid "Disconnect all Marks Keywords connections?"
-msgstr "Alle Makierung-Schlüsselwort-Verbindungen trennen?"
+msgstr "Alle Markierung-Schlüsselwort-Verbindungen trennen?"
 
 #: ../src/bar-keywords.cc:832
 msgid "This will disconnect all Marks Keywords connections"
@@ -637,7 +637,7 @@ msgstr "Löse Verbindung von \"%s\" zu Markierung %s"
 
 #: ../src/bar-keywords.cc:1180
 msgid "Disconnect all Mark Keyword connections"
-msgstr "Makierte Schlüsselwörter Verbindungen trennen"
+msgstr "Markierte Schlüsselwörter Verbindungen trennen"
 
 #: ../src/bar-keywords.cc:1188 ../src/bar-keywords.cc:1199
 msgid "Expand checked"
@@ -653,7 +653,7 @@ msgstr "Nicht ausgewählte verbergen"
 
 #: ../src/bar-keywords.cc:1191
 msgid "Revert all hidden"
-msgstr "Revert all hidden"
+msgstr "Verborgene wieder anzeigen"
 
 #: ../src/bar-keywords.cc:1193 ../src/dupe.cc:3668
 msgid "Show all"
@@ -974,7 +974,7 @@ msgid ""
 "This will remove all thumbnails and sim. files\n"
 "that have been saved to disk, continue?"
 msgstr ""
-"Dadurch werden alle Miniaturansichten und gleiche Dateien entfernt\n"
+"Dadurch werden alle Miniaturansichten und gleiche Dateien entfernt,\n"
 "die auf der Festplatte gespeichert wurden, fortfahren?\n"
 "?"
 
@@ -1065,7 +1065,7 @@ msgstr "Erstellen Sie Ähnlichkeitsdateien rekursiv."
 #: ../src/cache-maint.cc:1633
 msgid "Remove orphaned keywords and comments."
 msgstr ""
-"Entfernt ungültige und veraltete Schlüsselwörter und Kommenare aus diesem "
+"Entfernt ungültige und veraltete Schlüsselwörter und Kommentare aus diesem "
 "Speicher."
 
 #: ../src/cache-maint.cc:1639
@@ -1074,7 +1074,7 @@ msgstr "Auswahl"
 
 #: ../src/cache-maint.cc:1642
 msgid "Run cache maintenance as a background job."
-msgstr "Füre Cachewartung als Hintergrunddienst aus."
+msgstr "Führe Cachewartung als Hintergrunddienst aus."
 
 #: ../src/cache-maint.cc:1647
 msgid ""
@@ -1120,8 +1120,8 @@ msgid ""
 "Collection: %s\n"
 "File: %s\n"
 msgstr ""
-"Diese Sammlung kann nicht geöffnet werden, weil die einen Link zu einer "
-"Datei auf einem nicht gemounteten Laufwerk enthält.\n"
+"Diese Sammlung kann nicht geöffnet werden, weil sie einen Link zu einer "
+"Datei auf einem nicht eingehängten Laufwerk enthält.\n"
 "\n"
 "Sammlung: %s\n"
 "Datei: %s\n"
@@ -1202,7 +1202,7 @@ msgstr "AdobeRGB-kompatibel"
 
 #: ../src/color-man.cc:332
 msgid "Custom profile"
-msgstr "Benutzerprofiel"
+msgstr "Benutzerprofil"
 
 #: ../src/command-line-handling.cc:381 ../src/command-line-handling.cc:392
 #: ../src/command-line-handling.cc:402
@@ -1228,12 +1228,12 @@ msgstr "Seite Nr.: %d/%d\n"
 #: ../src/command-line-handling.cc:638
 #, c-format
 msgid "Country name: %s\n"
-msgstr "Lämdername: %s\n"
+msgstr "Ländername: %s\n"
 
 #: ../src/command-line-handling.cc:644
 #, c-format
 msgid "Country code: %s\n"
-msgstr "Länder Code: %s\n"
+msgstr "Ländercode: %s\n"
 
 #: ../src/command-line-handling.cc:650
 #, c-format
@@ -1337,7 +1337,7 @@ msgstr "Warnung"
 
 #: ../src/debug.cc:341
 msgid "Invalid input format\n"
-msgstr "Ungültiges Eingabformat\n"
+msgstr "Ungültiges Eingabeformat\n"
 
 #: ../src/debug.cc:352
 msgid "Failed to open file: "
@@ -3661,7 +3661,7 @@ msgstr "Wasser"
 
 #: ../src/metadata.cc:1749
 msgid "River"
-msgstr "Fluß"
+msgstr "Fluss"
 
 #: ../src/metadata.cc:1750
 msgid "Lake"
@@ -4894,7 +4894,7 @@ msgstr ""
 
 #: ../src/preferences.cc:2465
 msgid "A flowchart of the sequence is shown in the Help file"
-msgstr "Eine Flowchart der Sequenz wird in der Hilfedatei gezeigt"
+msgstr "Ein Flussdiagramm der Sequenz wird in der Hilfedatei gezeigt"
 
 #: ../src/preferences.cc:2469
 msgid "Step 1"
@@ -4948,7 +4948,7 @@ msgstr "Speichere Metadaten in Geeqies eigenem Verzeichnis"
 
 #: ../src/preferences.cc:2494
 msgid "Step 1 Options:"
-msgstr "Schritt 1 optional:"
+msgstr "Schritt 1 Optionen:"
 
 #: ../src/preferences.cc:2502
 msgid ""
@@ -4984,7 +4984,7 @@ msgstr "im Gegensatz zum Standard"
 
 #: ../src/preferences.cc:2517
 msgid "Steps 2 and 3 Option:"
-msgstr "Schritte 2 und 3 optional:"
+msgstr "Schritte 2 und 3 Optionen:"
 
 #: ../src/preferences.cc:2522
 msgid ""
@@ -6364,7 +6364,7 @@ msgstr "Herunterladen "
 
 #: ../src/ui-fileops.cc:1056
 msgid "File was not saved"
-msgstr "Datei wurde nicht gespreichert"
+msgstr "Datei wurde nicht gespeichert"
 
 #: ../src/ui-help.cc:112
 #, c-format
@@ -6928,7 +6928,7 @@ msgstr "Nichts auswählen"
 
 #: ../src/view-file/view-file.cc:1681
 msgid "Right-click for comparison options"
-msgstr "Rechsklick für Vergleichsoptionen"
+msgstr "Rechtsklick für Vergleichsoptionen"
 
 #: ../src/view-file/view-file.cc:1705
 msgid "Ignore Rating"
