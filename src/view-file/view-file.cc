@@ -421,6 +421,11 @@ static GdkContentProvider *vf_dnd_prepare(GtkDragSource *source, gdouble x, gdou
 	return dnd_file_list_content_provider(list);
 }
 
+static void vf_dnd_begin(GtkDragSource *, GdkDrag *drag, gpointer data)
+{
+	g_object_set_data(G_OBJECT(drag), VIEW_FILE_DATA_KEY, data);
+}
+
 static void vf_dnd_end(GtkDragSource *, GdkDrag *, gboolean, gpointer data)
 {
 	auto *vf = static_cast<ViewFile *>(data);
@@ -465,9 +470,128 @@ static void vf_dnd_text_received(GdkDrop *drop, const gchar *text, gpointer data
 	g_object_unref(drop_data->listview);
 }
 
-static gboolean vf_dnd_drop(GtkDropTargetAsync *, GdkDrop *drop, gdouble x, gdouble y, gpointer data)
+static gboolean vf_dnd_is_file_drop(GdkDrop *drop)
+{
+	GdkContentFormats *formats = gdk_drop_get_formats(drop);
+	return gdk_content_formats_contain_gtype(formats, GDK_TYPE_FILE_LIST) ||
+	       gdk_content_formats_contain_mime_type(formats, "text/uri-list");
+}
+
+static DnDAction vf_dnd_requested_action(GtkDropTargetAsync *target)
+{
+	const GdkModifierType state = gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(target));
+	if (state & GDK_CONTROL_MASK) return DND_ACTION_COPY;
+	if (state & GDK_SHIFT_MASK) return DND_ACTION_MOVE;
+
+	return options->dnd_default_action;
+}
+
+static GdkDragAction vf_dnd_drop_motion(GtkDropTargetAsync *target, GdkDrop *drop, gdouble x, gdouble y, gpointer data)
 {
 	auto *vf = static_cast<ViewFile *>(data);
+	if (!vf_dnd_is_file_drop(drop))
+		{
+		return vf_find_data_by_coord(vf, static_cast<gint>(x), static_cast<gint>(y), nullptr) ? GDK_ACTION_COPY : GDK_ACTION_NONE;
+		}
+
+	GdkDrag *drag = gdk_drop_get_drag(drop);
+	if (!vf->dir_fd || (drag && g_object_get_data(G_OBJECT(drag), VIEW_FILE_DATA_KEY) == vf)) return GDK_ACTION_NONE;
+
+	const GdkDragAction actions = gdk_drop_get_actions(drop);
+	if (vf_dnd_requested_action(target) == DND_ACTION_MOVE && (actions & GDK_ACTION_MOVE)) return GDK_ACTION_MOVE;
+	if (actions & GDK_ACTION_COPY) return GDK_ACTION_COPY;
+	if (actions & GDK_ACTION_MOVE) return GDK_ACTION_MOVE;
+	return GDK_ACTION_NONE;
+}
+
+struct VfDndFileDropData
+{
+	GtkWidget *listview;
+	FileData *directory;
+	FileDataList *list;
+	DnDAction action;
+	gdouble x;
+	gdouble y;
+};
+
+static void vf_dnd_file_drop_free(gpointer data)
+{
+	auto *drop_data = static_cast<VfDndFileDropData *>(data);
+	g_object_unref(drop_data->listview);
+	file_data_unref(drop_data->directory);
+	file_data_list_free(drop_data->list);
+	g_free(drop_data);
+}
+
+template<bool move>
+static void vf_dnd_file_operation(GtkWidget *, gpointer data)
+{
+	auto *drop_data = static_cast<VfDndFileDropData *>(data);
+	GList *list = drop_data->list;
+	drop_data->list = nullptr;
+	if (move)
+		{
+		file_util_move_simple(list, drop_data->directory->path, drop_data->listview);
+		}
+	else
+		{
+		file_util_copy_simple(list, drop_data->directory->path, drop_data->listview);
+		}
+}
+
+static void vf_dnd_files_received(GdkDrop *drop, GList *list, gpointer data)
+{
+	auto *drop_data = static_cast<VfDndFileDropData *>(data);
+	auto action = GDK_ACTION_NONE;
+	if (list && g_object_get_data(G_OBJECT(drop_data->listview), VIEW_FILE_DATA_KEY))
+		{
+		drop_data->list = filelist_copy(list);
+		const GdkDragAction actions = gdk_drop_get_actions(drop);
+		if (drop_data->action == DND_ACTION_COPY && (actions & GDK_ACTION_COPY))
+			{
+			vf_dnd_file_operation<false>(nullptr, drop_data);
+			action = GDK_ACTION_COPY;
+			}
+		else if (drop_data->action == DND_ACTION_MOVE && (actions & GDK_ACTION_MOVE))
+			{
+			vf_dnd_file_operation<true>(nullptr, drop_data);
+			action = GDK_ACTION_MOVE;
+			}
+		else
+			{
+			GtkWidget *menu = popover_box_new(drop_data->listview, drop_data->x, drop_data->y);
+			g_object_set_data_full(G_OBJECT(menu), "file-drop-data", drop_data, vf_dnd_file_drop_free);
+			popover_item_add_sensitive(menu, _("_Copy"), actions & GDK_ACTION_COPY, G_CALLBACK(vf_dnd_file_operation<false>), drop_data);
+			popover_item_add_sensitive(menu, _("_Move"), actions & GDK_ACTION_MOVE, G_CALLBACK(vf_dnd_file_operation<true>), drop_data);
+			popover_item_add(menu, _("Cancel"), G_CALLBACK(+[](GtkWidget *, gpointer) {}), nullptr);
+			popover_box_popup(menu);
+			/* The menu owns the operation; the source must keep its files. */
+			gdk_drop_finish(drop, (actions & GDK_ACTION_COPY) ? GDK_ACTION_COPY : GDK_ACTION_NONE);
+			return;
+			}
+		}
+
+	gdk_drop_finish(drop, action);
+	vf_dnd_file_drop_free(drop_data);
+}
+
+static gboolean vf_dnd_drop(GtkDropTargetAsync *target, GdkDrop *drop, gdouble x, gdouble y, gpointer data)
+{
+	auto *vf = static_cast<ViewFile *>(data);
+
+	if (vf_dnd_is_file_drop(drop))
+		{
+		if (vf_dnd_drop_motion(target, drop, x, y, vf) == GDK_ACTION_NONE) return FALSE;
+
+		auto *drop_data = g_new0(VfDndFileDropData, 1);
+		drop_data->listview = GTK_WIDGET(g_object_ref(vf->listview));
+		drop_data->directory = file_data_ref(vf->dir_fd);
+		drop_data->action = vf_dnd_requested_action(target);
+		drop_data->x = x;
+		drop_data->y = y;
+		dnd_read_file_list_async(drop, vf_dnd_files_received, drop_data);
+		return TRUE;
+		}
 
 	if (!vf_find_data_by_coord(vf, static_cast<gint>(x), static_cast<gint>(y), nullptr))
 		{
@@ -490,12 +614,14 @@ static void vf_dnd_init(ViewFile *vf)
 	gtk_drag_source_set_actions(drag_source, static_cast<GdkDragAction>(GDK_ACTION_COPY | GDK_ACTION_MOVE | GDK_ACTION_LINK));
 	gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag_source), 0);
 	g_signal_connect(drag_source, "prepare", G_CALLBACK(vf_dnd_prepare), vf);
+	g_signal_connect(drag_source, "drag-begin", G_CALLBACK(vf_dnd_begin), vf);
 	g_signal_connect(drag_source, "drag-end", G_CALLBACK(vf_dnd_end), vf);
 	gtk_widget_add_controller(vf->listview, GTK_EVENT_CONTROLLER(drag_source));
 
-	static const char *mime_types[] = {"text/plain"};
-	GdkContentFormats *formats = gdk_content_formats_new(mime_types, G_N_ELEMENTS(mime_types));
-	GtkDropTargetAsync *drop_target = gtk_drop_target_async_new(formats, GDK_ACTION_COPY);
+	GdkContentFormats *formats = dnd_file_drop_formats(TRUE);
+	GtkDropTargetAsync *drop_target = gtk_drop_target_async_new(formats, static_cast<GdkDragAction>(GDK_ACTION_COPY | GDK_ACTION_MOVE));
+	g_signal_connect(drop_target, "drag-enter", G_CALLBACK(vf_dnd_drop_motion), vf);
+	g_signal_connect(drop_target, "drag-motion", G_CALLBACK(vf_dnd_drop_motion), vf);
 	g_signal_connect(drop_target, "drop", G_CALLBACK(vf_dnd_drop), vf);
 	gtk_widget_add_controller(vf->listview, GTK_EVENT_CONTROLLER(drop_target));
 }
@@ -1093,7 +1219,7 @@ GtkWidget *vf_pop_menu(ViewFile *vf, GtkWidget *parent, gdouble x, gdouble y)
 
 	GMenu *sort_menu = G_MENU(gtk_builder_get_object(builder, "sort-submenu"));
 	for (const SortType sort_type : { SORT_NAME, SORT_NUMBER, SORT_TIME, SORT_CTIME, SORT_EXIFTIME,
-	                                  SORT_EXIFTIMEDIGITIZED, SORT_SIZE, SORT_RATING, SORT_CLASS })
+	                                  SORT_EXIFTIMEDIGITIZED, SORT_MEDIA_TIME, SORT_SIZE, SORT_RATING, SORT_CLASS })
 		{
 		gmenu_append_int32_action_item(sort_menu, sort_type_get_text(sort_type), "win.view-file-sort", sort_type);
 		}
@@ -1888,20 +2014,31 @@ ViewFile *vf_new(FileViewType type, FileData *dir_fd)
 	g_object_add_weak_pointer(G_OBJECT(vf->listview), reinterpret_cast<gpointer *>(&vf->listview));
 	g_object_set_data(G_OBJECT(vf->listview), VIEW_FILE_DATA_KEY, vf);
 
-	GtkEventController *key_controller = gtk_event_controller_key_new();
+	auto add_view_controllers = [vf](GtkWidget *view)
+	{
+		GtkEventController *key_controller = gtk_event_controller_key_new();
+		g_signal_connect(key_controller, "key-pressed", G_CALLBACK(vf_press_key_cb), vf);
+		gtk_widget_add_controller(view, key_controller);
 
-	g_signal_connect(key_controller, "key-pressed", G_CALLBACK(vf_press_key_cb), vf);
+		GtkGesture *gesture = gtk_gesture_click_new();
+		gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(gesture), 0);
+		gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(gesture), GTK_PHASE_CAPTURE);
+		g_signal_connect(gesture, "pressed", G_CALLBACK(vf_gesture_press_cb), vf);
+		g_signal_connect(gesture, "released", G_CALLBACK(vf_gesture_release_cb), vf);
+		gtk_widget_add_controller(view, GTK_EVENT_CONTROLLER(gesture));
+	};
 
-	gtk_widget_add_controller(vf->listview, key_controller);
-
-	GtkGesture *gesture = gtk_gesture_click_new();
-	gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(gesture), 0);
-	gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(gesture), GTK_PHASE_CAPTURE);
-	g_signal_connect(gesture, "pressed", G_CALLBACK(vf_gesture_press_cb), vf);
-	g_signal_connect(gesture, "released", G_CALLBACK(vf_gesture_release_cb), vf);
-	gtk_widget_add_controller(vf->listview, GTK_EVENT_CONTROLLER(gesture));
-
-	gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(vf->scrolled), vf->listview);
+	add_view_controllers(vf->listview);
+	if (type == FILEVIEW_LIST)
+		{
+		add_view_controllers(vflist_get_details_view(vf));
+		gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(vf->scrolled), GTK_POLICY_NEVER, GTK_POLICY_NEVER);
+		gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(vf->scrolled), vflist_get_view_widget(vf));
+		}
+	else
+		{
+		gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(vf->scrolled), vf->listview);
+		}
 
 	vf_dnd_init(vf);
 
@@ -2275,6 +2412,7 @@ guint vf_class_get_filter(ViewFile *vf)
 void vf_set_layout(ViewFile *vf, LayoutWindow *layout)
 {
 	vf->layout = layout;
+	if (vf->type == FILEVIEW_LIST) vflist_restore_divider_position(vf);
 	if (layout && layout->window)
 		{
 		GtkGesture *gesture = gtk_gesture_click_new();
@@ -2416,6 +2554,10 @@ static gboolean vf_read_metadata_in_idle_cb(gpointer data)
 			if (!fd->exifdate_digitized)
 				{
 				read_exif_time_digitized_data(fd);
+				}
+			if (!fd->media_date)
+				{
+				read_media_time_data(fd);
 				}
 			if (fd->rating == STAR_RATING_NOT_READ)
 				{

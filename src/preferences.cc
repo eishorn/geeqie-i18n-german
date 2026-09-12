@@ -249,6 +249,8 @@ static gint debug_c;
 #endif
 
 static GtkWidget *configwindow = nullptr;
+static GtkWidget *accel_conflicts_window = nullptr;
+static GtkTextBuffer *accel_conflicts_buffer = nullptr;
 static GListStore *filter_store = nullptr;
 
 namespace
@@ -330,6 +332,8 @@ AccelRow *accel_row_new(const gchar *action, const gchar *key, const gchar *desc
 } // namespace
 
 static GListStore *accel_store = nullptr;
+static guint accel_reload_idle_id = 0;
+static bool accel_reloading = false;
 
 static GtkWidget *safe_delete_path_entry;
 
@@ -506,9 +510,6 @@ static void config_window_apply(const ConfOptions *c_options)
 
 	options->image.enable_read_ahead = c_options->image.enable_read_ahead;
 
-	options->appimage_notifications = c_options->appimage_notifications;
-
-
 	if (options->image.use_custom_border_color != c_options->image.use_custom_border_color
 	    || options->image.use_custom_border_color_in_fullscreen != c_options->image.use_custom_border_color_in_fullscreen
 	    || !gdk_rgba_equal(&options->image.border_color, &c_options->image.border_color))
@@ -648,6 +649,8 @@ static void config_window_apply(const ConfOptions *c_options)
 	toolbar_apply(TOOLBAR_STATUS);
 }
 
+static void accel_conflicts_window_update();
+
 /*
  *-----------------------------------------------------------------------------
  * config window main button callbacks (private)
@@ -656,6 +659,17 @@ static void config_window_apply(const ConfOptions *c_options)
 
 static void config_window_close_cb(GtkWidget *, gpointer)
 {
+	if (accel_reload_idle_id)
+		{
+		g_source_remove(accel_reload_idle_id);
+		accel_reload_idle_id = 0;
+		}
+	if (accel_conflicts_window)
+		{
+		gtk_window_destroy(GTK_WINDOW(accel_conflicts_window));
+		accel_conflicts_window = nullptr;
+		accel_conflicts_buffer = nullptr;
+		}
 	gtk_window_destroy(GTK_WINDOW(configwindow));
 	configwindow = nullptr;
 	g_clear_object(&filter_store);
@@ -1428,36 +1442,338 @@ static void accel_store_populate()
 
 	gsize n_groups = 0;
 	g_auto(GStrv) groups = g_key_file_get_groups(kf, &n_groups);
+	g_autoptr(GHashTable) listed_actions = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, nullptr);
 
 	for (gsize i = 0; i < n_groups; i++)
 		{
 		g_autofree gchar *accels = g_key_file_get_string(kf, groups[i], "accels", nullptr);
 
 		const char *description = get_description_for_action_name(groups[i]);
+		const char *icon_name = get_icon_for_action_name(groups[i]);
+		constexpr auto plugin_action_prefix = "win.main-win-plugin-run::";
+		if (g_str_has_prefix(groups[i], plugin_action_prefix))
+			{
+			const EditorDescription *editor = get_editor_by_command(groups[i] + strlen(plugin_action_prefix));
+			if (editor)
+				{
+				description = editor->comment && *editor->comment ? editor->comment : editor->name;
+				icon_name = editor->icon && *editor->icon ? editor->icon : GQ_ICON_MISSING_IMAGE;
+				}
+			}
 
 		if (!description)
 			{
 			description = "UNKNOWN";
 			}
 
-		const char *icon_name = get_icon_for_action_name(groups[i]);
-
 		auto *row = accel_row_new(groups[i], accels ? accels : "", description, icon_name);
+		g_list_store_append(accel_store, row);
+		g_object_unref(row);
+		g_hash_table_add(listed_actions, g_strdup(groups[i]));
+		}
+
+	for (const EditorDescription *editor : editor_list_get())
+		{
+		g_autofree gchar *action = g_strdup_printf("win.main-win-plugin-run::%s", editor->key);
+		if (g_hash_table_contains(listed_actions, action)) continue;
+
+		const gchar *description = editor->comment && *editor->comment ? editor->comment : editor->name;
+		const gchar *icon_name = editor->icon && *editor->icon ? editor->icon : GQ_ICON_MISSING_IMAGE;
+		auto *row = accel_row_new(action, editor->hotkey ? editor->hotkey : "", description, icon_name);
 		g_list_store_append(accel_store, row);
 		g_object_unref(row);
 		}
 }
 
-static void accel_reload_and_apply()
+static gboolean accel_reload_and_apply_cb(gpointer)
 {
+	accel_reload_idle_id = 0;
+	accel_reloading = true;
 	accel_map_load_merged();
 	reload_registered_accels(GTK_APPLICATION(g_application_get_default()), get_keyfile_merged());
+	editor_plugin_accels_reload();
+	// GTK may restore window focus after the dialog closes. Release the focused
+	// row while it is still parented, before removing the list items.
+	GtkWidget *focus = gtk_window_get_focus(GTK_WINDOW(configwindow));
+	if (focus && gtk_widget_get_ancestor(focus, GTK_TYPE_COLUMN_VIEW))
+		{
+		gtk_window_set_focus(GTK_WINDOW(configwindow), nullptr);
+		}
 	g_list_store_remove_all(accel_store);
 	accel_store_populate();
+	accel_conflicts_window_update();
+	accel_reloading = false;
+	return G_SOURCE_REMOVE;
+}
+
+static void accel_reload_and_apply()
+{
+	// Rebuilding the list must wait until editing and dialog event handling finish.
+	if (!accel_reload_idle_id)
+		{
+		accel_reload_idle_id = g_idle_add(accel_reload_and_apply_cb, nullptr);
+		}
+}
+
+static gchar *accel_normalize(const gchar *accelerator)
+{
+	guint key = 0;
+	GdkModifierType modifiers = GDK_NO_MODIFIER_MASK;
+	gtk_accelerator_parse(accelerator, &key, &modifiers);
+	return key ? gtk_accelerator_name(key, modifiers) : nullptr;
+}
+
+static GHashTable *accel_normalized_set(const gchar *accelerators)
+{
+	auto *set = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, nullptr);
+	g_auto(GStrv) accelerator_list = g_strsplit(accelerators ? accelerators : "", ";", -1);
+	for (gchar **accelerator = accelerator_list; *accelerator; accelerator++)
+		{
+		g_strstrip(*accelerator);
+		g_autofree gchar *normalized = accel_normalize(*accelerator);
+		if (normalized) g_hash_table_add(set, g_steal_pointer(&normalized));
+		}
+	return set;
+}
+
+static gchar *accel_remove_conflicts(const gchar *accelerators, GHashTable *conflicts)
+{
+	g_autoptr(GString) result = g_string_new(nullptr);
+	g_auto(GStrv) accelerator_list = g_strsplit(accelerators ? accelerators : "", ";", -1);
+	for (gchar **accelerator = accelerator_list; *accelerator; accelerator++)
+		{
+		g_strstrip(*accelerator);
+		g_autofree gchar *normalized = accel_normalize(*accelerator);
+		if (!normalized || g_hash_table_contains(conflicts, normalized)) continue;
+		if (result->len > 0) g_string_append_c(result, ';');
+		g_string_append(result, *accelerator);
+		}
+	return g_string_free(g_steal_pointer(&result), FALSE);
+}
+
+static gchar *accel_action_window(const gchar *action)
+{
+	if (!g_str_has_prefix(action, "win.")) return nullptr;
+	const gchar *window_end = g_strstr_len(action, -1, "-win-");
+	return window_end ? g_strndup(action, window_end + strlen("-win-") - action) : nullptr;
+}
+
+static bool accel_actions_share_window(const gchar *action1, const gchar *action2)
+{
+	/* Application actions are active in every Geeqie window. */
+	if (g_str_has_prefix(action1, "app.") || g_str_has_prefix(action2, "app.")) return true;
+
+	g_autofree gchar *window1 = accel_action_window(action1);
+	g_autofree gchar *window2 = accel_action_window(action2);
+	if (!window1 || !window2) return g_strcmp0(action1, action2) == 0;
+	return g_strcmp0(window1, window2) == 0;
+}
+
+static std::vector<AccelRow *> accel_conflicting_rows(const AccelRow *edited_row, const gchar *accelerators)
+{
+	std::vector<AccelRow *> rows;
+	g_autoptr(GHashTable) requested = accel_normalized_set(accelerators);
+	for (guint i = 0; i < g_list_model_get_n_items(G_LIST_MODEL(accel_store)); i++)
+		{
+		auto *row = static_cast<AccelRow *>(g_list_model_get_item(G_LIST_MODEL(accel_store), i));
+		if (row != edited_row && accel_actions_share_window(edited_row->action, row->action))
+			{
+			g_autoptr(GHashTable) assigned = accel_normalized_set(row->key);
+			GHashTableIter iter;
+			gpointer accelerator;
+			g_hash_table_iter_init(&iter, requested);
+			while (g_hash_table_iter_next(&iter, &accelerator, nullptr))
+				{
+				if (g_hash_table_contains(assigned, accelerator))
+					{
+					rows.push_back(row);
+					break;
+					}
+				}
+			}
+		g_object_unref(row);
+		}
+	return rows;
+}
+
+static gchar *accel_existing_conflicts_message()
+{
+	g_autoptr(GString) conflicts = g_string_new(nullptr);
+	const guint n_rows = g_list_model_get_n_items(G_LIST_MODEL(accel_store));
+	for (guint i = 0; i < n_rows; i++)
+		{
+		auto *row1 = static_cast<AccelRow *>(g_list_model_get_item(G_LIST_MODEL(accel_store), i));
+		g_autoptr(GHashTable) assigned1 = accel_normalized_set(row1->key);
+		for (guint j = i + 1; j < n_rows; j++)
+			{
+			auto *row2 = static_cast<AccelRow *>(g_list_model_get_item(G_LIST_MODEL(accel_store), j));
+			if (accel_actions_share_window(row1->action, row2->action))
+				{
+				g_autoptr(GHashTable) assigned2 = accel_normalized_set(row2->key);
+				GHashTableIter iter;
+				gpointer accelerator;
+				g_hash_table_iter_init(&iter, assigned1);
+				while (g_hash_table_iter_next(&iter, &accelerator, nullptr))
+					{
+					if (g_hash_table_contains(assigned2, accelerator))
+						{
+						g_string_append_printf(conflicts, "%s: %s / %s\n", static_cast<gchar *>(accelerator), row1->action, row2->action);
+						}
+					}
+				}
+			g_object_unref(row2);
+			}
+		g_object_unref(row1);
+		}
+	return conflicts->len > 0 ? g_string_free(g_steal_pointer(&conflicts), FALSE) : nullptr;
+}
+
+static gboolean accel_conflicts_window_close_cb(GtkWindow *window, gpointer)
+{
+	gtk_widget_set_visible(GTK_WIDGET(window), FALSE);
+	return TRUE;
+}
+
+static void accel_conflicts_window_close_button_cb(GtkWidget *, gpointer)
+{
+	if (accel_conflicts_window) gtk_widget_set_visible(accel_conflicts_window, FALSE);
+}
+
+static void accel_conflicts_window_update()
+{
+	if (!accel_conflicts_buffer) return;
+
+	g_autofree gchar *conflicts = accel_existing_conflicts_message();
+	gtk_text_buffer_set_text(accel_conflicts_buffer,
+	                         conflicts ? conflicts : _("No conflicting shortcuts."), -1);
+}
+
+static void accel_conflicts_window_show(GtkWidget *parent)
+{
+	if (!accel_conflicts_window)
+		{
+		accel_conflicts_window = window_new("shortcut_conflicts", GQ_ICON_DIALOG_WARNING,
+		                                    _("Shortcut conflicts"));
+		DEBUG_NAME(accel_conflicts_window);
+		gtk_window_set_default_size(GTK_WINDOW(accel_conflicts_window), 700, 300);
+		gtk_window_set_resizable(GTK_WINDOW(accel_conflicts_window), TRUE);
+		gtk_window_set_modal(GTK_WINDOW(accel_conflicts_window), FALSE);
+		if (GTK_IS_WINDOW(parent))
+			{
+			gtk_window_set_transient_for(GTK_WINDOW(accel_conflicts_window), GTK_WINDOW(parent));
+			}
+		g_signal_connect(accel_conflicts_window, "close-request",
+		                 G_CALLBACK(accel_conflicts_window_close_cb), nullptr);
+
+		GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, PREF_PAD_SPACE);
+		gtk_widget_set_margin_top(vbox, PREF_PAD_BORDER);
+		gtk_widget_set_margin_bottom(vbox, PREF_PAD_BORDER);
+		gtk_widget_set_margin_start(vbox, PREF_PAD_BORDER);
+		gtk_widget_set_margin_end(vbox, PREF_PAD_BORDER);
+		gtk_window_set_child(GTK_WINDOW(accel_conflicts_window), vbox);
+
+		GtkWidget *label = gtk_label_new(_("The following keyboard shortcuts have conflicting assignments:"));
+		gtk_label_set_xalign(GTK_LABEL(label), 0.0);
+		gtk_box_append(GTK_BOX(vbox), label);
+
+		GtkWidget *scrolled = gtk_scrolled_window_new();
+		gtk_scrolled_window_set_has_frame(GTK_SCROLLED_WINDOW(scrolled), TRUE);
+		gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled),
+		                               GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+		gtk_widget_set_hexpand(scrolled, TRUE);
+		gtk_widget_set_vexpand(scrolled, TRUE);
+		gtk_box_append(GTK_BOX(vbox), scrolled);
+
+		GtkWidget *text_view = gtk_text_view_new();
+		gtk_text_view_set_editable(GTK_TEXT_VIEW(text_view), FALSE);
+		gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(text_view), FALSE);
+		gtk_text_view_set_monospace(GTK_TEXT_VIEW(text_view), TRUE);
+		gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(text_view), GTK_WRAP_WORD_CHAR);
+		accel_conflicts_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(text_view));
+		gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled), text_view);
+
+		GtkWidget *button_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, PREF_PAD_BUTTON_GAP);
+		gtk_widget_set_halign(button_box, GTK_ALIGN_END);
+		gtk_box_append(GTK_BOX(vbox), button_box);
+		GtkWidget *close_button = pref_button_new(button_box, GQ_ICON_CLOSE, _("Close"),
+		                                          G_CALLBACK(accel_conflicts_window_close_button_cb), nullptr);
+		gtk_window_set_default_widget(GTK_WINDOW(accel_conflicts_window), close_button);
+		}
+
+	accel_conflicts_window_update();
+	gtk_window_present(GTK_WINDOW(accel_conflicts_window));
+}
+
+static gboolean accel_show_existing_conflicts_cb(gpointer data)
+{
+	auto *keyboard_page = static_cast<GtkWidget *>(data);
+	if (!gtk_widget_get_mapped(keyboard_page))
+		{
+		g_object_set_data(G_OBJECT(keyboard_page), "conflicts-warned", nullptr);
+		return G_SOURCE_REMOVE;
+		}
+
+	g_object_set_data(G_OBJECT(keyboard_page), "conflicts-warned", GINT_TO_POINTER(TRUE));
+
+	g_autofree gchar *conflicts = accel_existing_conflicts_message();
+	if (!conflicts) return G_SOURCE_REMOVE;
+	GtkWidget *parent = GTK_IS_WINDOW(configwindow) ? configwindow : widget_get_toplevel(keyboard_page);
+	accel_conflicts_window_show(parent);
+
+	return G_SOURCE_REMOVE;
+}
+
+static void accel_keyboard_page_map_cb(GtkWidget *keyboard_page, gpointer)
+{
+	if (g_object_get_data(G_OBJECT(keyboard_page), "conflicts-warned")) return;
+	g_object_set_data(G_OBJECT(keyboard_page), "conflicts-warned", GINT_TO_POINTER(TRUE));
+
+	/* Let the Preferences window receive its compositor placement before
+	 * creating the transient warning window. */
+	g_timeout_add_full(G_PRIORITY_DEFAULT, 250, accel_show_existing_conflicts_cb,
+	                   g_object_ref(keyboard_page), g_object_unref);
+}
+
+struct AccelReplaceData
+{
+	GtkEditable *label;
+	std::string action;
+	std::string old_accelerators;
+	std::string new_accelerators;
+	std::vector<std::pair<std::string, std::string>> conflicts;
+};
+
+static void accel_replace_data_free(AccelReplaceData *data)
+{
+	g_object_unref(data->label);
+	delete data;
+}
+
+static void accel_replace_cancel_cb(GenericDialog *, gpointer data)
+{
+	auto *replace_data = static_cast<AccelReplaceData *>(data);
+	gtk_editable_set_text(replace_data->label, replace_data->old_accelerators.c_str());
+	accel_replace_data_free(replace_data);
+}
+
+static void accel_replace_ok_cb(GenericDialog *, gpointer data)
+{
+	auto *replace_data = static_cast<AccelReplaceData *>(data);
+	g_autoptr(GHashTable) replacements = accel_normalized_set(replace_data->new_accelerators.c_str());
+	bool success = true;
+	for (const auto &[action, accelerators] : replace_data->conflicts)
+		{
+		g_autofree gchar *remaining = accel_remove_conflicts(accelerators.c_str(), replacements);
+		success = update_modified_shortcut(action.c_str(), remaining) && success;
+		}
+	if (success) success = update_modified_shortcut(replace_data->action.c_str(), replace_data->new_accelerators.c_str());
+	if (success) accel_reload_and_apply();
+	accel_replace_data_free(replace_data);
 }
 
 static void accel_key_editing_changed(GtkEditableLabel *label, GParamSpec *, gpointer)
 {
+	if (accel_reloading) return;
 	if (gtk_editable_label_get_editing(label)) return;
 	auto *row = static_cast<AccelRow *>(g_object_get_data(G_OBJECT(label), "accel-row"));
 	if (!row) return;
@@ -1467,11 +1783,34 @@ static void accel_key_editing_changed(GtkEditableLabel *label, GParamSpec *, gpo
 	if (!accelerator_string_is_valid(new_text))
 		{
 		warning_dialog(_("Invalid shortcut"), _("The shortcut must use GTK accelerator syntax. Separate multiple shortcuts with semicolons."),
-		               GQ_ICON_DIALOG_WARNING, nullptr);
+		               GQ_ICON_DIALOG_WARNING, configwindow);
 		return;
 		}
 
-	if (update_modified_shortcut(row->action, new_text)) accel_reload_and_apply();
+	const auto conflicts = accel_conflicting_rows(row, new_text);
+	if (conflicts.empty())
+		{
+		if (update_modified_shortcut(row->action, new_text)) accel_reload_and_apply();
+		return;
+		}
+
+	auto *replace_data = new AccelReplaceData{GTK_EDITABLE(g_object_ref(label)), row->action, row->key, new_text, {}};
+	g_autoptr(GString) conflicting_commands = g_string_new(nullptr);
+	for (const AccelRow *conflict : conflicts)
+		{
+		replace_data->conflicts.emplace_back(conflict->action, conflict->key);
+		if (conflicting_commands->len > 0) g_string_append_c(conflicting_commands, '\n');
+		g_string_append(conflicting_commands, conflict->action);
+		}
+
+	g_autofree gchar *message = g_strdup_printf(_("The shortcut is already assigned to:\n%s\n\nReplace the existing assignment?"), conflicting_commands->str);
+	GtkWidget *parent = GTK_IS_WINDOW(configwindow) ? configwindow : widget_get_toplevel(GTK_WIDGET(label));
+	GenericDialog *gd = generic_dialog_new(_("Shortcut conflict"), "shortcut_conflict", parent, TRUE,
+	                                       accel_replace_cancel_cb, replace_data);
+	gtk_window_set_modal(GTK_WINDOW(gd->dialog), TRUE);
+	generic_dialog_add_message(gd, GQ_ICON_DIALOG_WARNING, _("Shortcut conflict"), message, TRUE);
+	generic_dialog_add_button(gd, GQ_ICON_OK, _("Replace"), accel_replace_ok_cb, TRUE);
+	gtk_window_present(GTK_WINDOW(gd->dialog));
 }
 
 static void accel_default_cb(GtkWidget *, gpointer)
@@ -1804,17 +2143,6 @@ static void config_tab_general(GtkWidget *notebook, ConfOptions *c_options)
 
 	pref_spacer(group, PREF_PAD_GROUP);
 
-	if ((g_getenv("APPDIR") && strstr(g_getenv("APPDIR"), "/tmp/.mount_Geeqie")) || (g_strstr_len(gq_executable_path, -1, "squashfs-root")))
-		{
-		group = pref_group_new(vbox, FALSE, _("AppImage updates notifications"), GTK_ORIENTATION_VERTICAL);
-		hbox = pref_box_new(group, TRUE, GTK_ORIENTATION_HORIZONTAL, PREF_PAD_SPACE);
-		pref_checkbox_new_int(group, _("Enable"), options->appimage_notifications, &c_options->appimage_notifications);
-		gtk_widget_set_tooltip_text(group, _("Show a notification on start-up if the server has a newer version than the current. Requires an Internet connection"));
-
-		pref_spacer(group, PREF_PAD_GROUP);
-		}
-
-
 	net_mon = g_network_monitor_get_default();
 	tz_org = g_network_address_parse_uri(TIMEZONE_DATABASE_WEB, 80, nullptr);
 	if (tz_org)
@@ -1990,7 +2318,7 @@ static GtkWidget *create_popover(GtkWidget *child, GtkPositionType pos)
 	gtk_widget_set_margin_bottom(popover, 6);
 	gtk_widget_set_margin_start(popover, 6);
 	gtk_widget_set_margin_end(popover, 6);
-	gtk_widget_show (child);
+	gtk_widget_set_visible(child, TRUE);
 
 	return popover;
 }
@@ -3240,12 +3568,19 @@ static void accel_factory_bind(GtkSignalListItemFactory *factory, GtkListItem *l
 		}
 }
 
+static void accel_factory_unbind(GtkSignalListItemFactory *, GtkListItem *list_item, gpointer)
+{
+	GtkWidget *widget = gtk_list_item_get_child(list_item);
+	g_object_set_data(G_OBJECT(widget), "accel-row", nullptr);
+}
+
 static GtkColumnViewColumn *accel_column_new(const gchar *title, gint column)
 {
 	auto *factory = gtk_signal_list_item_factory_new();
 	g_object_set_data(G_OBJECT(factory), "accel-column", GINT_TO_POINTER(column));
 	g_signal_connect(factory, "setup", G_CALLBACK(accel_factory_setup), nullptr);
 	g_signal_connect(factory, "bind", G_CALLBACK(accel_factory_bind), nullptr);
+	g_signal_connect(factory, "unbind", G_CALLBACK(accel_factory_unbind), nullptr);
 
 	auto *view_column = gtk_column_view_column_new(title, GTK_LIST_ITEM_FACTORY(factory));
 	gtk_column_view_column_set_resizable(view_column, TRUE);
@@ -3291,13 +3626,37 @@ static bool accel_capture_key_press(GtkEventControllerKey *, guint keyval, [[may
 		return TRUE;
 		}
 
-	char *accel = gtk_accelerator_name(key, mods);
+	g_autofree char *accel = nullptr;
+	const guint lowercase_key = gdk_keyval_to_lower(key);
+	const bool alphabetic_key = lowercase_key != gdk_keyval_to_upper(key);
+	const bool shifted_alpha = alphabetic_key &&
+	                           ((mods & GDK_SHIFT_MASK) || (gdk_keyval_is_upper(key) && lowercase_key != key));
+	if (shifted_alpha)
+		{
+		/* GTK may report a shifted letter as an uppercase keyval without
+		 * retaining Shift in the controller state. Build the explicit form. */
+		key = lowercase_key;
+		auto mods_without_shift = static_cast<GdkModifierType>(mods & ~GDK_SHIFT_MASK);
+		g_autofree gchar *unshifted = gtk_accelerator_name(key, mods_without_shift);
+		accel = g_strconcat("<Shift>", unshifted, nullptr);
+		}
+	else if ((mods & GDK_SHIFT_MASK) &&
+	         g_unichar_isgraph(gdk_keyval_to_unicode(key)) &&
+	         !g_unichar_isalnum(gdk_keyval_to_unicode(key)))
+		{
+		/* The keyval already represents the shifted symbol, for example
+		 * parenright for Shift+0, so an additional Shift is incorrect. */
+		auto mods_without_shift = static_cast<GdkModifierType>(mods & ~GDK_SHIFT_MASK);
+		accel = gtk_accelerator_name(key, mods_without_shift);
+		}
+	else
+		{
+		accel = gtk_accelerator_name(key, mods);
+		}
 	gtk_editable_set_text(GTK_EDITABLE(widget), accel);
 
 	GdkClipboard *cb = gdk_display_get_clipboard(gdk_display_get_default());
 	gdk_clipboard_set_text(cb, accel);
-
-	g_free(accel);
 
 	return TRUE;
 }
@@ -3311,6 +3670,8 @@ static void config_tab_accelerators(GtkWidget *notebook)
 	GtkWidget *accel_view;
 
 	vbox = scrolled_notebook_page(notebook, _("Keyboard"));
+	GtkWidget *keyboard_page = gtk_widget_get_parent(vbox);
+	g_signal_connect(keyboard_page, "map", G_CALLBACK(accel_keyboard_page_map_cb), nullptr);
 
 	group = pref_group_new(vbox, TRUE, _("Keyboard Shortcuts"), GTK_ORIENTATION_VERTICAL);
 	GtkWidget *search_entry = gtk_search_entry_new();
@@ -3360,6 +3721,7 @@ Double-click on the Key column and add or replace the text.\n");
 	gtk_box_append(GTK_BOX(hbox), key_value);
 
 	GtkEventController *controller = gtk_event_controller_key_new();
+	gtk_event_controller_set_propagation_phase(controller, GTK_PHASE_CAPTURE);
 	g_signal_connect(controller, "key-pressed",  G_CALLBACK(accel_capture_key_press), key_value);
 	gtk_widget_add_controller(key_value, controller);
 
@@ -3506,12 +3868,12 @@ static GtkWidget *config_window_create(LayoutWindow *lw, ConfOptions *c_options)
 		gtk_window_set_default_size(GTK_WINDOW(configwindow), CONFIG_WINDOW_DEF_WIDTH, CONFIG_WINDOW_DEF_HEIGHT);
 		}
 	gtk_window_set_resizable(GTK_WINDOW(configwindow), TRUE);
-	gtk_widget_set_margin_top(configwindow, PREF_PAD_BORDER);
-	gtk_widget_set_margin_bottom(configwindow, PREF_PAD_BORDER);
-	gtk_widget_set_margin_start(configwindow, PREF_PAD_BORDER);
-	gtk_widget_set_margin_end(configwindow, PREF_PAD_BORDER);
 
 	GtkWidget *win_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, PREF_PAD_SPACE);
+	gtk_widget_set_margin_top(win_vbox, PREF_PAD_BORDER);
+	gtk_widget_set_margin_bottom(win_vbox, PREF_PAD_BORDER);
+	gtk_widget_set_margin_start(win_vbox, PREF_PAD_BORDER);
+	gtk_widget_set_margin_end(win_vbox, PREF_PAD_BORDER);
 	gtk_window_set_child(GTK_WINDOW(configwindow), win_vbox);
 
 	GtkWidget *notebook = gtk_notebook_new();

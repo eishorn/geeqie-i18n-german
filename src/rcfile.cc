@@ -394,7 +394,7 @@ gboolean read_bool_option(const gchar *option, const gchar *label, const gchar *
  *-----------------------------------------------------------------------------
  */
 
-static void write_global_attributes(GString *outstr, gint indent)
+static void write_global_attributes(const ConfOptions *options, GString *outstr, gint indent)
 {
 	/* General Options */
 	WRITE_NL(); WRITE_BOOL(*options, show_icon_names);
@@ -451,7 +451,6 @@ static void write_global_attributes(GString *outstr, gint indent)
 	WRITE_NL(); WRITE_BOOL(*options, log_window.timer_data);
 	WRITE_NL(); WRITE_CHAR(*options, log_window.action);
 
-	WRITE_NL(); WRITE_BOOL(*options, appimage_notifications);
 	WRITE_NL(); WRITE_BOOL(*options, marks_save);
 	WRITE_NL(); WRITE_CHAR(*options, help_search_engine);
 
@@ -634,7 +633,7 @@ static void write_global_attributes(GString *outstr, gint indent)
 	WRITE_SEPARATOR();
 }
 
-static void write_color_profile(GString *outstr, gint indent)
+static void write_color_profile(const ConfOptions *options, GString *outstr, gint indent)
 {
 	gint i;
 #if !HAVE_LCMS
@@ -663,7 +662,7 @@ static void write_color_profile(GString *outstr, gint indent)
 	WRITE_NL(); WRITE_STRING("</color_profiles>");
 }
 
-static void write_osd_profiles(GString *outstr, gint indent)
+static void write_osd_profiles(const ConfOptions *options, GString *outstr, gint indent)
 {
 	gint i;
 
@@ -695,7 +694,7 @@ static void write_osd_profiles(GString *outstr, gint indent)
 	WRITE_STRING("</osd_profiles>");
 }
 
-static void write_marks_tooltips(GString *outstr, gint indent)
+static void write_marks_tooltips(const ConfOptions *options, GString *outstr, gint indent)
 {
 	gint i;
 
@@ -711,7 +710,7 @@ static void write_marks_tooltips(GString *outstr, gint indent)
 	WRITE_NL(); WRITE_STRING("</marks_tooltips>");
 }
 
-static void write_class_filter(GString *outstr, gint indent)
+static void write_class_filter(const ConfOptions *options, GString *outstr, gint indent)
 {
 	gint i;
 
@@ -751,7 +750,7 @@ static void write_disabled_plugins(GString *outstr, gint indent)
  *-----------------------------------------------------------------------------
  */
 
-gboolean save_config_to_file(const gchar *utf8_path, ConfOptions *options, LayoutWindow *lw)
+gboolean save_config_to_file(const gchar *utf8_path, const ConfOptions *options, LayoutWindow *lw)
 {
 	gint indent = 0;
 
@@ -776,28 +775,28 @@ gboolean save_config_to_file(const gchar *utf8_path, ConfOptions *options, Layou
 		{
 		WRITE_NL(); WRITE_STRING("<global\n");
 		indent++;
-		write_global_attributes(outstr, indent + 1);
+		write_global_attributes(options, outstr, indent + 1);
 		indent--;
 		WRITE_STRING(">\n");
 
 		indent++;
 
-		write_color_profile(outstr, indent);
+		write_color_profile(options, outstr, indent);
 
 		WRITE_SEPARATOR();
-		write_osd_profiles(outstr, indent);
+		write_osd_profiles(options, outstr, indent);
 
 		WRITE_SEPARATOR();
 		filter_write_list(outstr, indent);
 
 		WRITE_SEPARATOR();
-		write_marks_tooltips(outstr, indent);
+		write_marks_tooltips(options, outstr, indent);
 
 		WRITE_SEPARATOR();
 		write_disabled_plugins(outstr, indent);
 
 		WRITE_SEPARATOR();
-		write_class_filter(outstr, indent);
+		write_class_filter(options, outstr, indent);
 
 		WRITE_SEPARATOR();
 		keyword_tree_write_config(outstr, indent);
@@ -928,7 +927,6 @@ static gboolean load_global_params(const gchar **attribute_names, const gchar **
 		if (READ_BOOL(*options, log_window.timer_data)) continue;
 		if (READ_CHAR(*options, log_window.action)) continue;
 
-		if (READ_BOOL(*options, appimage_notifications)) continue;
 		if (READ_BOOL(*options, marks_save)) continue;
 		if (READ_CHAR(*options, help_search_engine)) continue;
 
